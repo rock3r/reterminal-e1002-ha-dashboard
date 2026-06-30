@@ -1,0 +1,8 @@
+generate_now:
+  name: Generate Dashboard Now
+  description: Force immediate generation of eDashboard images and binary output.
+  fields:
+    dashboard:
+      name: Dashboard Name
+      description: Optional dashboard key to generate (for example weather_vienna). If omitted, all dashboards are generated.
+      example: weather_vienna

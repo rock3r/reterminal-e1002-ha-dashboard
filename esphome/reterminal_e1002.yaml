@@ -1,0 +1,379 @@
+substitutions:
+  device_name: reterminal_1002
+  friendly_name: eDashboard
+  # The "dashboard" query param must match the HA edashboard config below
+  # (i.e. a sanitized form of your `location:`). Change "vicenza" to yours.
+  # Use the IP form if mDNS (.local) is unreliable on your network:
+  #   image_url: "http://<homeassistant-ip>:8123/api/edashboard/latest?dashboard=vicenza"
+  image_url: "http://homeassistant.local:8123/api/edashboard/latest?dashboard=vicenza"
+  # Panel-safe auto-refresh cadence (Seeed advises refreshing infrequently).
+  refresh_interval: 30min
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  min_version: 2025.2.0
+  on_boot:
+    - priority: 600
+      then:
+        - output.turn_on: bsp_sd_enable
+        - output.turn_on: bsp_battery_enable
+        - delay: 200ms
+        - component.update: battery_voltage
+        - component.update: battery_level
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  hardware_uart: UART0
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  # Never self-reboot just because no HA client is connected — this is a
+  # dashboard that also works standalone over HTTP. (Default is 15 min.)
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+  on_connect:
+    then:
+      - logger.log: "WiFi connected - loading dashboard"
+      - script.execute: refresh_now
+  ap:
+    ssid: "${friendly_name} Fallback"
+    # Weak placeholder for the captive-portal fallback AP — CHANGE THIS before
+    # flashing (or move it to secrets.yaml as !secret ap_password).
+    password: "ChangeMe1234"
+
+captive_portal:
+
+http_request:
+  verify_ssl: false
+  timeout: 20s
+  watchdog_timeout: 25s
+
+# SNTP (not homeassistant) because this device is not adopted into HA's API.
+time:
+  - platform: sntp
+    id: ha_time
+    timezone: Europe/Rome
+    on_time:
+      # Nightly panel-care clean to clear e-ink ghosting / image retention.
+      - seconds: 0
+        minutes: 0
+        hours: 3
+        then:
+          - logger.log: "Nightly panel-care clean"
+          - script.execute: panel_clean
+
+globals:
+  # 0 = draw dashboard, 1 = flush white, 2 = flush black (used by panel_clean).
+  - id: panel_mode
+    type: int
+    restore_value: no
+    initial_value: "0"
+
+# Panel-safe periodic refresh (on-demand refresh is on the buttons).
+interval:
+  - interval: ${refresh_interval}
+    then:
+      - script.execute: refresh_now
+
+script:
+  # Manual / periodic refresh: drop the cached buffer and re-download. The HA
+  # endpoint re-renders on every fetch, so the redrawn image is always current.
+  - id: refresh_now
+    mode: restart
+    then:
+      - logger.log: "Refreshing dashboard"
+      - lambda: 'id(dashboard_image).release();'
+      - component.update: dashboard_image
+
+  # E-ink ghosting clear: flush white/black/white, then redraw the dashboard.
+  - id: panel_clean
+    mode: single
+    then:
+      - logger.log: "Panel clean: white"
+      - lambda: 'id(panel_mode) = 1;'
+      - component.update: epaper_display
+      - delay: 35s
+      - logger.log: "Panel clean: black"
+      - lambda: 'id(panel_mode) = 2;'
+      - component.update: epaper_display
+      - delay: 35s
+      - logger.log: "Panel clean: white"
+      - lambda: 'id(panel_mode) = 1;'
+      - component.update: epaper_display
+      - delay: 35s
+      - lambda: 'id(panel_mode) = 0;'
+      - script.execute: refresh_now
+
+  # Single short tone = manual refresh.
+  - id: beep
+    then:
+      - rtttl.play: "beep:d=16,o=6,b=200:a6"
+
+  # Distinct descending two-tone = panel clean (long press).
+  - id: beep_clean
+    then:
+      - rtttl.play: "clean:d=8,o=5,b=160:c6,g5"
+
+font:
+  - file: "../custom_components/edashboard/assets/fonts/Jost.ttf"
+    id: jost_20
+    size: 20
+    glyphs: "0123456789.%"
+
+image:
+  - file: mdi:battery-outline
+    id: batt_icon_empty
+    resize: 25x25
+    type: BINARY
+    transparency: chroma_key
+  - file: mdi:battery-20
+    id: batt_icon_20
+    resize: 25x25
+    type: BINARY
+    transparency: chroma_key
+  - file: mdi:battery-40
+    id: batt_icon_40
+    resize: 25x25
+    type: BINARY
+    transparency: chroma_key
+  - file: mdi:battery-60
+    id: batt_icon_60
+    resize: 25x25
+    type: BINARY
+    transparency: chroma_key
+  - file: mdi:battery-80
+    id: batt_icon_80
+    resize: 25x25
+    type: BINARY
+    transparency: chroma_key
+  - file: mdi:battery
+    id: batt_icon_full
+    resize: 25x25
+    type: BINARY
+    transparency: chroma_key
+
+spi:
+  clk_pin: GPIO7
+  mosi_pin: GPIO9
+
+i2c:
+  scl: GPIO20
+  sda: GPIO19
+
+online_image:
+  - id: dashboard_image
+    url: ${image_url}
+    format: png
+    type: RGB565
+    buffer_size: 65536
+    on_download_finished:
+      - logger.log: "Dashboard image downloaded"
+      - component.update: epaper_display
+    on_error:
+      - logger.log: "Dashboard image download failed"
+
+display:
+  - platform: epaper_spi
+    id: epaper_display
+    model: Seeed-reTerminal-E1002
+    update_interval: never
+    full_update_every: 1
+    lambda: |-
+      // Panel-care flush modes (used by panel_clean).
+      if (id(panel_mode) == 1) { it.fill(Color(255, 255, 255)); return; }
+      if (id(panel_mode) == 2) { it.fill(Color(0, 0, 0)); return; }
+
+      it.image(0, 0, id(dashboard_image));
+
+      // Battery widget over the backend's update-time slot (top-right).
+      const int widget_w = 100;
+      const int widget_h = 25;
+      const int widget_x = it.get_width() - 10 - widget_w;
+      const int widget_y = 40 - widget_h;
+      const Color ui_gray(88, 88, 88);
+
+      it.filled_rectangle(widget_x, widget_y, widget_w, widget_h, Color(255, 255, 255));
+
+      float batt = id(battery_level).state;
+      if (isnan(batt)) batt = 0.0f;
+      if (batt < 0.0f) batt = 0.0f;
+      if (batt > 100.0f) batt = 100.0f;
+
+      char batt_txt[12];
+      snprintf(batt_txt, sizeof(batt_txt), "%.0f%%", batt);
+
+      int xb = 0, yb = 0, tw = 0, th = 0;
+      it.get_text_bounds(0, 0, batt_txt, id(jost_20), TextAlign::TOP_LEFT, &xb, &yb, &tw, &th);
+      const int text_y = widget_y + ((widget_h - th) / 2);
+      it.printf(widget_x, text_y, id(jost_20), ui_gray, TextAlign::TOP_LEFT, "%s", batt_txt);
+
+      const int icon_x = widget_x + tw + 10;
+      const int icon_y = widget_y;
+      if (batt >= 95.0f) {
+        it.image(icon_x, icon_y, id(batt_icon_full), ui_gray, Color(255, 255, 255));
+      } else if (batt >= 75.0f) {
+        it.image(icon_x, icon_y, id(batt_icon_80), ui_gray, Color(255, 255, 255));
+      } else if (batt >= 55.0f) {
+        it.image(icon_x, icon_y, id(batt_icon_60), ui_gray, Color(255, 255, 255));
+      } else if (batt >= 35.0f) {
+        it.image(icon_x, icon_y, id(batt_icon_40), ui_gray, Color(255, 255, 255));
+      } else if (batt >= 15.0f) {
+        it.image(icon_x, icon_y, id(batt_icon_20), ui_gray, Color(255, 255, 255));
+      } else {
+        it.image(icon_x, icon_y, id(batt_icon_empty), ui_gray, Color(255, 255, 255));
+      }
+
+button:
+  # HA-triggered refresh: no beep (only the physical buttons beep).
+  - platform: template
+    name: "Refresh Dashboard Now"
+    on_press:
+      - script.execute: refresh_now
+  - platform: template
+    name: "Panel Clean"
+    entity_category: config
+    on_press:
+      - script.execute: panel_clean
+
+binary_sensor:
+  - platform: status
+    name: "${friendly_name} Online"
+
+  # RIGHT button -> refresh
+  - platform: gpio
+    id: button_right
+    name: "Right Button"
+    pin:
+      number: GPIO4
+      mode: INPUT_PULLUP
+      inverted: true
+    on_press:
+      - logger.log: "Right button - refresh"
+      - script.execute: beep
+      - script.execute: refresh_now
+
+  # LEFT button -> refresh
+  - platform: gpio
+    id: button_left
+    name: "Left Button"
+    pin:
+      number: GPIO5
+      mode: INPUT_PULLUP
+      inverted: true
+    on_press:
+      - logger.log: "Left button - refresh"
+      - script.execute: beep
+      - script.execute: refresh_now
+
+  # CENTER / GREEN button -> short press refresh, long press (>=3s) panel clean
+  - platform: gpio
+    id: button_center
+    name: "Center Button"
+    pin:
+      number: GPIO3
+      mode: INPUT_PULLUP
+      inverted: true
+    on_multi_click:
+      - timing:
+          - ON for at most 1.2s
+          - OFF for at least 0.2s
+        then:
+          - logger.log: "Center short press - refresh"
+          - script.execute: beep
+          - script.execute: refresh_now
+      - timing:
+          - ON for at least 3s
+        then:
+          - logger.log: "Center long press - panel clean"
+          - script.execute: beep_clean
+          - script.execute: panel_clean
+
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal dB"
+    id: wifi_signal_db
+    update_interval: 60s
+    entity_category: diagnostic
+  - platform: copy
+    source_id: wifi_signal_db
+    name: "WiFi Signal Percent"
+    unit_of_measurement: "%"
+    entity_category: diagnostic
+    filters:
+      - lambda: return min(max(2.0f * (x + 100.0f), 0.0f), 100.0f);
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 60s
+  - platform: internal_temperature
+    name: "Internal Temperature"
+    update_interval: 60s
+  - platform: adc
+    id: battery_voltage
+    pin: GPIO1
+    name: "Battery Voltage"
+    attenuation: 12db
+    update_interval: 60s
+    filters:
+      - multiply: 2.0
+  - platform: template
+    id: battery_level
+    name: "Battery Level"
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    update_interval: 60s
+    lambda: |-
+      float v = id(battery_voltage).state;
+      float pct = (v - 3.27f) / (4.15f - 3.27f) * 100.0f;
+      if (pct < 0.0f) pct = 0.0f;
+      if (pct > 100.0f) pct = 100.0f;
+      return pct;
+
+output:
+  - platform: gpio
+    pin: GPIO6
+    id: bsp_led
+    inverted: true
+  - platform: gpio
+    pin: GPIO16
+    id: bsp_sd_enable
+  - platform: gpio
+    pin: GPIO21
+    id: bsp_battery_enable
+  # Onboard buzzer (reTerminal E1002 = GPIO45, PWM via LEDC).
+  - platform: ledc
+    pin: GPIO45
+    id: buzzer_pwm
+
+# Short audible feedback on manual refresh. Low gain = quiet.
+rtttl:
+  id: buzzer
+  output: buzzer_pwm
+  gain: 0.3
+
+light:
+  - platform: binary
+    name: "Onboard LED"
+    output: bsp_led
+    id: onboard_led
+
+text_sensor:
+  - platform: version
+    name: "${friendly_name} ESPHome Version"

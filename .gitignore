@@ -1,0 +1,25 @@
+# Secrets — never commit
+secrets.yaml
+esphome/secrets.yaml
+
+# ESPHome build artifacts
+.esphome/
+esphome_build/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv*/
+venv*/
+
+# Local render output (curated examples live in docs/examples/)
+out/
+tools/out/
+
+# Source fonts for the build script are large and downloaded on demand
+tools/fonts_src/*.ttf
+tools/fonts_src/*.codepoints
+
+# OS / editor cruft
+.DS_Store
